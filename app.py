@@ -71,17 +71,19 @@ def extract_images():
     try:
         logging.info("Iniciando procesamiento con PyMuPDF...")
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        # (El resto del código de extracción es el mismo)
         imagenes_extraidas = []
         for i in range(len(doc)):
             pagina = doc[i]
             for img_index, img_info in enumerate(pagina.get_images(full=True)):
                 bbox = pagina.get_image_bbox(img_info)
                 pix = pagina.get_pixmap(clip=bbox, alpha=True)
-                img_buffer = io.BytesIO()
-                pix.save(img_buffer, "png")
-                img_buffer.seek(0)
-                img_base64 = base64.b64encode(img_buffer.read()).decode('utf-8')
+                
+                # --- CAMBIO REALIZADO AQUÍ ---
+                # Usamos pix.tobytes() que es más directo y robusto
+                img_bytes = pix.tobytes(output="png")
+                img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+                # --- FIN DEL CAMBIO ---
+
                 imagenes_extraidas.append({
                     "filename": f"pagina_{i+1}_imagen_{img_index+1}.png",
                     "data_base64": img_base64
