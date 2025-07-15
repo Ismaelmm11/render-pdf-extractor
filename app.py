@@ -1,75 +1,98 @@
-# app.py
+# app.py (versión con logging para depuración)
 import os
 import fitz  # PyMuPDF
 import requests
 import base64
 import io
+import logging
 from flask import Flask, request, jsonify
+
+# --- Configuración del Logging ---
+# Esto hará que los mensajes se impriman en la consola de logs de Render
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Inicializamos la aplicación Flask
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    # Una ruta simple para saber que el servicio está funcionando
-    return "Servicio de extracción de imágenes de PDF está activo."
+    return "Servicio de extracción de imágenes de PDF está activo (modo depuración)."
 
 @app.route('/extract', methods=['POST'])
 def extract_images():
-    """
-    Este es el endpoint principal. Recibe una URL de un PDF,
-    extrae las imágenes y las devuelve en formato Base64.
-    """
+    logging.info("========================================")
+    logging.info("Nueva petición recibida en /extract")
+    
     # 1. Obtenemos los datos JSON de la petición
-    data = request.get_json()
-    if not data or 'pdf_download_url' not in data:
-        return jsonify({"error": "Falta el parámetro 'pdf_download_url' en el cuerpo de la petición"}), 400
+    try:
+        data = request.get_json()
+        if not data:
+            logging.error("El cuerpo de la petición está vacío o no es JSON.")
+            return jsonify({"error": "Cuerpo de la petición vacío o no es JSON"}), 400
+        
+        logging.info(f"Cuerpo JSON recibido: {data}")
+        
+        pdf_url = data.get('pdf_download_url')
+        if not pdf_url:
+            logging.error("No se encontró 'pdf_download_url' en el JSON.")
+            return jsonify({"error": "Falta el parámetro 'pdf_download_url'"}), 400
+        
+        logging.info(f"URL del PDF a descargar: {pdf_url}")
 
-    pdf_url = data['pdf_download_url']
+    except Exception as e:
+        logging.error(f"Error al procesar el JSON de entrada: {e}")
+        return jsonify({"error": f"Error al procesar el JSON de entrada: {e}"}), 400
 
     # 2. Descargamos el PDF desde la URL
     try:
-        response = requests.get(pdf_url)
-        response.raise_for_status()  # Lanza un error si la descarga falla (ej. 404)
+        logging.info("Iniciando descarga del archivo PDF...")
+        response = requests.get(pdf_url, timeout=30) # Añadimos un timeout
+        
+        logging.info(f"Respuesta de Google Drive - Código de estado: {response.status_code}")
+        logging.info(f"Respuesta de Google Drive - Cabeceras de contenido: {response.headers.get('Content-Type')}")
+
+        # Si Google nos da un error, lo registramos y paramos
+        response.raise_for_status()
+        
         pdf_bytes = response.content
+        logging.info(f"Descarga completada. Tamaño del archivo: {len(pdf_bytes)} bytes.")
+        
+        # Verificamos si parece un PDF
+        if not pdf_bytes.startswith(b'%PDF-'):
+            logging.warning("El archivo descargado NO comienza con '%PDF-'. Podría no ser un PDF válido.")
+            # Mostramos los primeros 200 bytes para ver qué es (probablemente una página de error de Google)
+            logging.warning(f"Inicio del contenido descargado: {pdf_bytes[:200]}")
+
     except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"Error al descargar el PDF: {e}"}), 500
+        logging.error(f"FALLO en la descarga del PDF: {e}")
+        return jsonify({"error": f"Fallo al descargar el archivo desde la URL: {e}"}), 500
 
     # 3. Procesamos el PDF con PyMuPDF
     try:
+        logging.info("Iniciando procesamiento con PyMuPDF...")
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        # (El resto del código de extracción es el mismo)
         imagenes_extraidas = []
-        
-        # Lógica de extracción que ya perfeccionamos
         for i in range(len(doc)):
             pagina = doc[i]
             for img_index, img_info in enumerate(pagina.get_images(full=True)):
-                try:
-                    bbox = pagina.get_image_bbox(img_info)
-                    pix = pagina.get_pixmap(clip=bbox, alpha=True)
-                    
-                    img_buffer = io.BytesIO()
-                    pix.save(img_buffer, "png")
-                    img_buffer.seek(0)
-                    
-                    img_base64 = base64.b64encode(img_buffer.read()).decode('utf-8')
-                    
-                    imagenes_extraidas.append({
-                        "filename": f"pagina_{i+1}_imagen_{img_index+1}.png",
-                        "data_base64": img_base64
-                    })
-                    pix = None
-                except Exception as e_inner:
-                    print(f"Omitiendo una imagen en la página {i+1} por error: {e_inner}")
-                    continue
+                bbox = pagina.get_image_bbox(img_info)
+                pix = pagina.get_pixmap(clip=bbox, alpha=True)
+                img_buffer = io.BytesIO()
+                pix.save(img_buffer, "png")
+                img_buffer.seek(0)
+                img_base64 = base64.b64encode(img_buffer.read()).decode('utf-8')
+                imagenes_extraidas.append({
+                    "filename": f"pagina_{i+1}_imagen_{img_index+1}.png",
+                    "data_base64": img_base64
+                })
+                pix = None
         
-        # 4. Devolvemos la lista de imágenes en formato JSON
+        logging.info(f"Procesamiento completado. Se extrajeron {len(imagenes_extraidas)} imágenes.")
+        logging.info("========================================")
         return jsonify({"imagenes": imagenes_extraidas})
 
     except Exception as e:
-        return jsonify({"error": f"Error al procesar el archivo PDF: {e}"}), 500
-
-# Esta parte es para ejecutar la app localmente si quisiéramos probarla
-if __name__ == '__main__':
-    # Render usará un servidor de producción como Gunicorn, no esto.
-    app.run(debug=True, port=os.getenv("PORT", default=5000))
+        logging.error(f"FALLO durante el procesamiento del PDF con PyMuPDF: {e}")
+        logging.info("========================================")
+        return jsonify({"error": f"Fallo al procesar el archivo PDF: {e}"}), 500
